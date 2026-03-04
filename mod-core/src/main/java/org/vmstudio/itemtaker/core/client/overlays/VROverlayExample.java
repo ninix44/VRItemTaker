@@ -1,4 +1,4 @@
-package your.mod.example.core.client.overlays;
+package org.vmstudio.itemtaker.core.client.overlays;
 
 
 import org.vmstudio.visor.api.client.gui.overlays.framework.VROverlayScreen;

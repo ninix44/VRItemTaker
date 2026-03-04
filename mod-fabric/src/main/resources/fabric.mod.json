@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "id": "visor_example",
+  "id": "itemtaker",
   "version": "${version}",
 
-  "name": "VisorExample",
-  "description": "The Example Addon for Visor",
+  "name": "ItemTaker",
+  "description": "Item Taker for Visor",
   "authors": [
-    "PhoenixRa"
+    "VMStudio"
   ],
   "license": "MIT",
   "environment": "*",
   "entrypoints": {
     "main": [
-      "your.mod.example.fabric.ExampleMod"
+      "org.vmstudio.itemtaker.fabric.ItemTakerMod"
     ]
   },
   "mixins": [

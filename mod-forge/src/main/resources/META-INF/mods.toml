@@ -3,31 +3,31 @@ loaderVersion = "[46,)"
 license = "MIT"
 
 [[mods]]
-modId = "visor_example"
+modId = "itemtaker"
 version = "${version}"
-displayName = "VisorExample"
-authors = "PhoenixRa"
+displayName = "ItemTaker"
+authors = "VMStudio"
 displayTest = "NONE"
 description = '''
-The Example Addon for Visor
+Item Taker for Visor
 
 '''
 
-[[dependencies.visor_example]]
+[[dependencies.itemtaker]]
 modId = "visor"
 mandatory = true
 versionRange = "[0.2.0-alpha,)"
 ordering = "AFTER"
 side = "BOTH"
 
-[[dependencies.visor_example]]
+[[dependencies.itemtaker]]
 modId = "forge"
 mandatory = true
 versionRange = "[46,)"
 ordering = "AFTER"
 side = "BOTH"
 
-[[dependencies.visor_example]]
+[[dependencies.itemtaker]]
 modId = "minecraft"
 mandatory = true
 versionRange = "[1.20,1.20.1]"
