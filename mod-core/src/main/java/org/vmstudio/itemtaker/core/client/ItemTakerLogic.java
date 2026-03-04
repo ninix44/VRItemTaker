@@ -4,10 +4,12 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3f;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class ItemTakerLogic {
@@ -16,10 +18,12 @@ public class ItemTakerLogic {
     }
     public static NetworkBridge bridge;
 
+    // todo remove the mouse check and implement checks for joystick controllers
     private static final double RANGE = 3.0;
     private static final double PICKUP_DISTANCE = 0.5;
+    private static final double GROUP_RADIUS = 1.0;
 
-    private static ItemEntity pickedItem = null;
+    private static final List<ItemEntity> pickedItems = new ArrayList<>();
     private static final Vector3f UP_VECTOR = new Vector3f(0, 1, 0);
     private static int syncTimer = 0;
 
@@ -27,11 +31,10 @@ public class ItemTakerLogic {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.player == null) return;
 
-        if (pickedItem == null) {
-            handleDetection(mc);
-        } else {
+        if (!pickedItems.isEmpty()) {
             handlePulling(mc);
         }
+        handleDetection(mc);
     }
 
     private static void handleDetection(Minecraft mc) {
@@ -43,14 +46,16 @@ public class ItemTakerLogic {
         double bestAngle = 0.99;
         Vec3 lookVec = mc.player.getViewVector(1.0F);
 
-        // todo if there are a lot of items in one place, then all the things should be picked up at once
-        // todo if the inventory is full, this item WON’T be picked up
         for (ItemEntity item : items) {
+            if (pickedItems.contains(item)) continue;
+
             Vec3 toItem = item.position().add(0, 0.2, 0).subtract(eyePos).normalize();
             double dot = lookVec.dot(toItem);
             if (dot > bestAngle) {
-                bestAngle = dot;
-                bestTarget = item;
+                if (canFitInSimulatedInventory(mc, item.getItem())) {
+                    bestAngle = dot;
+                    bestTarget = item;
+                }
             }
         }
 
@@ -62,43 +67,91 @@ public class ItemTakerLogic {
                 spawnHoverParticles(bestTarget);
 
                 if (mc.options.keyUse.isDown()) {
-                    pickedItem = bestTarget;
-                    pickedItem.setNoGravity(true);
+                    AABB groupZone = bestTarget.getBoundingBox().inflate(GROUP_RADIUS);
+                    List<ItemEntity> nearbyItems = mc.level.getEntitiesOfClass(ItemEntity.class, groupZone);
+
+                    for (ItemEntity groupItem : nearbyItems) {
+                        if (pickedItems.contains(groupItem)) continue;
+
+                        if (canFitInSimulatedInventory(mc, groupItem.getItem())) {
+                            groupItem.setNoGravity(true);
+                            pickedItems.add(groupItem);
+                        }
+                    }
                 }
             }
         }
     }
 
     private static void handlePulling(Minecraft mc) {
-        if (!pickedItem.isAlive()) {
-            pickedItem = null;
-            return;
-        }
-
         Vec3 targetPos = mc.player.position().add(0, 0.8, 0);
-        Vec3 itemPos = pickedItem.position();
-        double dist = itemPos.distanceTo(targetPos);
 
-        if (dist < PICKUP_DISTANCE) {
-            pickedItem.setPos(targetPos.x, targetPos.y, targetPos.z);
-            syncWithServer(pickedItem, targetPos, Vec3.ZERO, true);
-            pickedItem = null;
-            return;
-        }
+        pickedItems.removeIf(item -> {
+            if (!item.isAlive()) return true;
 
-        Vec3 motion = targetPos.subtract(itemPos).normalize().scale(0.5);
-        pickedItem.setDeltaMovement(motion);
-        pickedItem.hasImpulse = true;
+            double dist = item.position().distanceTo(targetPos);
+            if (dist < PICKUP_DISTANCE) {
+                item.setPos(targetPos.x, targetPos.y, targetPos.z);
+                syncWithServer(item, targetPos, Vec3.ZERO, false);
+                item.setNoGravity(false);
+                return true;
+            }
+
+            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(0.5);
+            item.setDeltaMovement(motion);
+            item.hasImpulse = true;
+
+            if (mc.level.random.nextBoolean()) {
+                mc.level.addParticle(ParticleTypes.CRIT, item.getX(), item.getY(), item.getZ(), 0, 0, 0);
+            }
+            return false;
+        });
 
         syncTimer++;
         if (syncTimer >= 2) {
-            syncWithServer(pickedItem, pickedItem.position(), motion, true);
+            for (ItemEntity item : pickedItems) {
+                syncWithServer(item, item.position(), item.getDeltaMovement(), true);
+            }
             syncTimer = 0;
         }
+    }
 
-        if (mc.level.random.nextBoolean()) {
-            mc.level.addParticle(ParticleTypes.CRIT, pickedItem.getX(), pickedItem.getY(), pickedItem.getZ(), 0, 0, 0);
+    private static boolean canFitInSimulatedInventory(Minecraft mc, ItemStack newStack) {
+        List<ItemStack> tempInv = new ArrayList<>();
+        for (int i = 0; i < 36; i++) {
+            tempInv.add(mc.player.getInventory().getItem(i).copy());
         }
+
+        for (ItemEntity flyingItem : pickedItems) {
+            simulateAddItem(tempInv, flyingItem.getItem());
+        }
+
+        return simulateAddItem(tempInv, newStack);
+    }
+
+    private static boolean simulateAddItem(List<ItemStack> inv, ItemStack toAdd) {
+        ItemStack stack = toAdd.copy();
+
+        if (stack.isStackable()) {
+            for (ItemStack slot : inv) {
+                if (!slot.isEmpty() && ItemStack.isSameItemSameTags(slot, stack)) {
+                    int space = slot.getMaxStackSize() - slot.getCount();
+                    int canTake = Math.min(space, stack.getCount());
+                    slot.grow(canTake);
+                    stack.shrink(canTake);
+                    if (stack.isEmpty()) return true;
+                }
+            }
+        }
+
+        for (int i = 0; i < inv.size(); i++) {
+            if (inv.get(i).isEmpty()) {
+                inv.set(i, stack);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void syncWithServer(Entity entity, Vec3 pos, Vec3 motion, boolean noGravity) {
