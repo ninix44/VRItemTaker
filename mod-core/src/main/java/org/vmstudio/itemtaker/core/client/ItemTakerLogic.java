@@ -8,6 +8,13 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3f;
+import org.vmstudio.visor.api.VisorAPI;
+import org.vmstudio.visor.api.client.player.VRLocalPlayer;
+import org.vmstudio.visor.api.client.player.pose.PlayerPoseType;
+import org.vmstudio.visor.api.common.player.PlayerPose;
+import org.vmstudio.visor.api.common.player.VRPose;
+import org.vmstudio.visor.api.common.utils.VRMathUtils;
+import org.vmstudio.visor.api.common.utils.Vector3fHistory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,32 +25,45 @@ public class ItemTakerLogic {
     }
     public static NetworkBridge bridge;
 
-    // todo remove the mouse check and implement checks for joystick controllers
     private static final double RANGE = 3.0;
     private static final double PICKUP_DISTANCE = 0.5;
-    private static final double GROUP_RADIUS = 1.0;
+    private static final double GROUP_RADIUS = 1.2;
+
+    private static final float FLICK_THRESHOLD = 0.15f;
 
     private static final List<ItemEntity> pickedItems = new ArrayList<>();
-    private static final Vector3f UP_VECTOR = new Vector3f(0, 1, 0);
+
+    private static final Vector3fHistory mainHandHistory = new Vector3fHistory(20);
+    private static final Vector3fHistory offHandHistory = new Vector3fHistory(20);
+
     private static int syncTimer = 0;
 
     public static void tick() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.player == null) return;
 
+        VRLocalPlayer vrPlayer = VisorAPI.client().getVRLocalPlayer();
+        if (vrPlayer == null) return;
+
+        PlayerPose pose = vrPlayer.getPoseData(PlayerPoseType.TICK);
+
+        mainHandHistory.add(pose.getMainHand().getPosition());
+        offHandHistory.add(pose.getOffhand().getPosition());
+
         if (!pickedItems.isEmpty()) {
             handlePulling(mc);
         }
-        handleDetection(mc);
+
+        handleVRInteraction(mc, pose);
     }
 
-    private static void handleDetection(Minecraft mc) {
+    private static void handleVRInteraction(Minecraft mc, PlayerPose pose) {
         Vec3 eyePos = mc.player.getEyePosition();
         AABB searchBox = mc.player.getBoundingBox().inflate(RANGE);
         List<ItemEntity> items = mc.level.getEntitiesOfClass(ItemEntity.class, searchBox);
 
         ItemEntity bestTarget = null;
-        double bestAngle = 0.99;
+        double bestAngle = 0.99; // 98 maybe, test on VR
         Vec3 lookVec = mc.player.getViewVector(1.0F);
 
         for (ItemEntity item : items) {
@@ -60,25 +80,34 @@ public class ItemTakerLogic {
         }
 
         if (bestTarget != null) {
-            Vector3f playerUp = new Vector3f(0, 1, 0);
-            float upDot = playerUp.dot(UP_VECTOR);
+            checkHand(mc, bestTarget, pose.getMainHand(), mainHandHistory);
+            checkHand(mc, bestTarget, pose.getOffhand(), offHandHistory);
+        }
+    }
 
-            if (upDot > 0.2f) {
-                spawnHoverParticles(bestTarget);
+    private static void checkHand(Minecraft mc, ItemEntity target, VRPose handPose, Vector3fHistory history) {
+        Vector3f handUp = VRMathUtils.extractUpDir(handPose.getRotation(), true);
+        float upDot = handUp.dot(new Vector3f(0, 1, 0));
 
-                if (mc.options.keyUse.isDown()) {
-                    AABB groupZone = bestTarget.getBoundingBox().inflate(GROUP_RADIUS);
-                    List<ItemEntity> nearbyItems = mc.level.getEntitiesOfClass(ItemEntity.class, groupZone);
+        if (upDot > 0.2f) {
+            spawnHoverParticles(target);
 
-                    for (ItemEntity groupItem : nearbyItems) {
-                        if (pickedItems.contains(groupItem)) continue;
+            Vector3f netMove = history.netMovement(0.2f);
+            if (netMove.y() > FLICK_THRESHOLD) {
+                captureItems(mc, target);
+            }
+        }
+    }
 
-                        if (canFitInSimulatedInventory(mc, groupItem.getItem())) {
-                            groupItem.setNoGravity(true);
-                            pickedItems.add(groupItem);
-                        }
-                    }
-                }
+    private static void captureItems(Minecraft mc, ItemEntity target) {
+        AABB groupZone = target.getBoundingBox().inflate(GROUP_RADIUS);
+        List<ItemEntity> nearbyItems = mc.level.getEntitiesOfClass(ItemEntity.class, groupZone);
+
+        for (ItemEntity groupItem : nearbyItems) {
+            if (pickedItems.contains(groupItem)) continue;
+            if (canFitInSimulatedInventory(mc, groupItem.getItem())) {
+                groupItem.setNoGravity(true);
+                pickedItems.add(groupItem);
             }
         }
     }
@@ -97,7 +126,7 @@ public class ItemTakerLogic {
                 return true;
             }
 
-            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(0.5);
+            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(0.5); // 0.6 maybe, test on VR
             item.setDeltaMovement(motion);
             item.hasImpulse = true;
 
