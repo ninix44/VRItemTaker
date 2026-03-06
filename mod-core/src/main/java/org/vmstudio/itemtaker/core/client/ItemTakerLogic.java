@@ -11,33 +11,45 @@ import org.joml.Vector3f;
 import org.vmstudio.visor.api.VisorAPI;
 import org.vmstudio.visor.api.client.player.VRLocalPlayer;
 import org.vmstudio.visor.api.client.player.pose.PlayerPoseType;
+import org.vmstudio.visor.api.client.player.pose.RawController;
+import org.vmstudio.visor.api.common.HandType;
 import org.vmstudio.visor.api.common.player.PlayerPose;
 import org.vmstudio.visor.api.common.player.VRPose;
-import org.vmstudio.visor.api.common.utils.VRMathUtils;
-import org.vmstudio.visor.api.common.utils.Vector3fHistory;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class ItemTakerLogic {
     public interface NetworkBridge {
         void sendSync(Entity entity, double x, double y, double z, double vx, double vy, double vz, boolean noGravity);
+        void sendPickup(Entity entity, boolean isMainHand);
     }
     public static NetworkBridge bridge;
 
-    private static final double RANGE = 3.0;
-    private static final double PICKUP_DISTANCE = 0.5;
-    private static final double GROUP_RADIUS = 1.2;
+    private static final double RANGE = 7.0;
+    private static final double PICKUP_DISTANCE = 0.6;
+    private static final double GROUP_RADIUS = 1.5;
 
-    private static final float FLICK_THRESHOLD = 0.15f;
+    private static final float FLICK_THRESHOLD = 0.25f;
 
-    private static final List<ItemEntity> pickedItems = new ArrayList<>();
-
-    private static final Vector3fHistory mainHandHistory = new Vector3fHistory(20);
-    private static final Vector3fHistory offHandHistory = new Vector3fHistory(20);
+    private static final List<PulledItem> pulledItems = new ArrayList<>();
+    private static final Set<ItemEntity> currentGlowingItems = new HashSet<>();
 
     private static int syncTimer = 0;
 
+    private static class PulledItem {
+        ItemEntity item;
+        HandType targetHand;
+
+        PulledItem(ItemEntity item, HandType targetHand) {
+            this.item = item;
+            this.targetHand = targetHand;
+        }
+    }
+
+    // todo: for some reason, when the HAND is empty, the item sometimes flies, either into the hand, or into the center of the cell in the hotbar, it works "RANDOM". Should I make additional checks
     public static void tick() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.player == null) return;
@@ -47,31 +59,47 @@ public class ItemTakerLogic {
 
         PlayerPose pose = vrPlayer.getPoseData(PlayerPoseType.TICK);
 
-        mainHandHistory.add(pose.getMainHand().getPosition());
-        offHandHistory.add(pose.getOffhand().getPosition());
-
-        if (!pickedItems.isEmpty()) {
-            handlePulling(mc);
+        if (!pulledItems.isEmpty()) {
+            handlePulling(mc, pose);
         }
 
-        handleVRInteraction(mc, pose);
+        Set<ItemEntity> newGlowingItems = new HashSet<>();
+        handleHandInteraction(mc, vrPlayer, pose, HandType.MAIN, newGlowingItems);
+        handleHandInteraction(mc, vrPlayer, pose, HandType.OFFHAND, newGlowingItems);
+
+        for (ItemEntity oldItem : currentGlowingItems) {
+            if (!newGlowingItems.contains(oldItem) && oldItem.isAlive()) {
+                oldItem.setGlowingTag(false);
+            }
+        }
+        currentGlowingItems.clear();
+        currentGlowingItems.addAll(newGlowingItems);
     }
 
-    private static void handleVRInteraction(Minecraft mc, PlayerPose pose) {
-        Vec3 eyePos = mc.player.getEyePosition();
+    private static void handleHandInteraction(Minecraft mc, VRLocalPlayer vrPlayer, PlayerPose pose, HandType handType, Set<ItemEntity> glowingItems) {
+        VRPose handPose = pose.getHand(handType);
+        RawController rawCtrl = vrPlayer.getRawController(handType);
+
+        if (!rawCtrl.isTracking()) return;
+
+        Vec3 handPos = handPose.getPositionVec3();
+        Vec3 handForward = handPose.getDirectionVec3();
+
         AABB searchBox = mc.player.getBoundingBox().inflate(RANGE);
         List<ItemEntity> items = mc.level.getEntitiesOfClass(ItemEntity.class, searchBox);
 
         ItemEntity bestTarget = null;
-        double bestAngle = 0.99; // 98 maybe, test on VR
-        Vec3 lookVec = mc.player.getViewVector(1.0F);
+        double bestAngle = -1.0;
 
         for (ItemEntity item : items) {
-            if (pickedItems.contains(item)) continue;
+            if (isItemAlreadyPulled(item)) continue;
 
-            Vec3 toItem = item.position().add(0, 0.2, 0).subtract(eyePos).normalize();
-            double dot = lookVec.dot(toItem);
-            if (dot > bestAngle) {
+            Vec3 toItem = item.position().add(0, 0.2, 0).subtract(handPos).normalize();
+            double dot = handForward.dot(toItem);
+
+            double requiredAngle = currentGlowingItems.contains(item) ? 0.65 : 0.92;
+
+            if (dot > requiredAngle && dot > bestAngle) {
                 if (canFitInSimulatedInventory(mc, item.getItem())) {
                     bestAngle = dot;
                     bestTarget = item;
@@ -80,69 +108,82 @@ public class ItemTakerLogic {
         }
 
         if (bestTarget != null) {
-            checkHand(mc, bestTarget, pose.getMainHand(), mainHandHistory);
-            checkHand(mc, bestTarget, pose.getOffhand(), offHandHistory);
-        }
-    }
+            bestTarget.setGlowingTag(true);
+            glowingItems.add(bestTarget);
 
-    private static void checkHand(Minecraft mc, ItemEntity target, VRPose handPose, Vector3fHistory history) {
-        Vector3f handUp = VRMathUtils.extractUpDir(handPose.getRotation(), true);
-        float upDot = handUp.dot(new Vector3f(0, 1, 0));
+            if (mc.level.random.nextInt(2) == 0) {
+                mc.level.addParticle(ParticleTypes.GLOW,
+                    bestTarget.getX(), bestTarget.getY() + 0.2, bestTarget.getZ(),
+                    0, 0.02, 0
+                );
+            }
 
-        if (upDot > 0.2f) {
-            spawnHoverParticles(target);
+            Vector3f netMove = rawCtrl.getPositionHistory().netMovement(0.15f);
+            Vec3 moveVec = new Vec3(netMove.x(), netMove.y(), netMove.z());
+            double moveLen = moveVec.length();
 
-            Vector3f netMove = history.netMovement(0.2f);
-            if (netMove.y() > FLICK_THRESHOLD) {
-                captureItems(mc, target);
+            Vec3 toItem = bestTarget.position().subtract(handPos).normalize();
+            double dotTowardsItem = moveLen > 0 ? (moveVec.dot(toItem) / moveLen) : 0;
+
+            if (moveLen > FLICK_THRESHOLD && (moveVec.y < -0.15 || dotTowardsItem < -0.25)) {
+                captureItems(mc, bestTarget, handType);
             }
         }
     }
 
-    private static void captureItems(Minecraft mc, ItemEntity target) {
+    private static void captureItems(Minecraft mc, ItemEntity target, HandType handType) {
         AABB groupZone = target.getBoundingBox().inflate(GROUP_RADIUS);
         List<ItemEntity> nearbyItems = mc.level.getEntitiesOfClass(ItemEntity.class, groupZone);
 
         for (ItemEntity groupItem : nearbyItems) {
-            if (pickedItems.contains(groupItem)) continue;
+            if (isItemAlreadyPulled(groupItem)) continue;
+
             if (canFitInSimulatedInventory(mc, groupItem.getItem())) {
                 groupItem.setNoGravity(true);
-                pickedItems.add(groupItem);
+                groupItem.setGlowingTag(false);
+                groupItem.setPickUpDelay(10);
+                pulledItems.add(new PulledItem(groupItem, handType));
             }
         }
     }
 
-    private static void handlePulling(Minecraft mc) {
-        Vec3 targetPos = mc.player.position().add(0, 0.8, 0);
-
-        pickedItems.removeIf(item -> {
+    private static void handlePulling(Minecraft mc, PlayerPose pose) {
+        pulledItems.removeIf(pulled -> {
+            ItemEntity item = pulled.item;
             if (!item.isAlive()) return true;
 
+            Vec3 targetPos = pose.getHand(pulled.targetHand).getPositionVec3();
             double dist = item.position().distanceTo(targetPos);
+
             if (dist < PICKUP_DISTANCE) {
-                item.setPos(targetPos.x, targetPos.y, targetPos.z);
-                syncWithServer(item, targetPos, Vec3.ZERO, false);
-                item.setNoGravity(false);
+                if (bridge != null) {
+                    bridge.sendPickup(item, pulled.targetHand == HandType.MAIN);
+                }
                 return true;
             }
 
-            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(0.5); // 0.6 maybe, test on VR
+            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(0.8);
             item.setDeltaMovement(motion);
             item.hasImpulse = true;
 
-            if (mc.level.random.nextBoolean()) {
-                mc.level.addParticle(ParticleTypes.CRIT, item.getX(), item.getY(), item.getZ(), 0, 0, 0);
-            }
             return false;
         });
 
         syncTimer++;
         if (syncTimer >= 2) {
-            for (ItemEntity item : pickedItems) {
+            for (PulledItem pulled : pulledItems) {
+                ItemEntity item = pulled.item;
                 syncWithServer(item, item.position(), item.getDeltaMovement(), true);
             }
             syncTimer = 0;
         }
+    }
+
+    private static boolean isItemAlreadyPulled(ItemEntity item) {
+        for (PulledItem pulled : pulledItems) {
+            if (pulled.item.equals(item)) return true;
+        }
+        return false;
     }
 
     private static boolean canFitInSimulatedInventory(Minecraft mc, ItemStack newStack) {
@@ -150,17 +191,14 @@ public class ItemTakerLogic {
         for (int i = 0; i < 36; i++) {
             tempInv.add(mc.player.getInventory().getItem(i).copy());
         }
-
-        for (ItemEntity flyingItem : pickedItems) {
-            simulateAddItem(tempInv, flyingItem.getItem());
+        for (PulledItem flyingItem : pulledItems) {
+            simulateAddItem(tempInv, flyingItem.item.getItem());
         }
-
         return simulateAddItem(tempInv, newStack);
     }
 
     private static boolean simulateAddItem(List<ItemStack> inv, ItemStack toAdd) {
         ItemStack stack = toAdd.copy();
-
         if (stack.isStackable()) {
             for (ItemStack slot : inv) {
                 if (!slot.isEmpty() && ItemStack.isSameItemSameTags(slot, stack)) {
@@ -172,27 +210,18 @@ public class ItemTakerLogic {
                 }
             }
         }
-
         for (int i = 0; i < inv.size(); i++) {
             if (inv.get(i).isEmpty()) {
                 inv.set(i, stack);
                 return true;
             }
         }
-
         return false;
     }
 
     private static void syncWithServer(Entity entity, Vec3 pos, Vec3 motion, boolean noGravity) {
         if (bridge != null) {
             bridge.sendSync(entity, pos.x, pos.y, pos.z, motion.x, motion.y, motion.z, noGravity);
-        }
-    }
-
-    private static void spawnHoverParticles(ItemEntity item) {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.level.random.nextInt(2) == 0) {
-            mc.level.addParticle(ParticleTypes.GLOW, item.getX(), item.getY() + 0.2, item.getZ(), 0, 0.02, 0);
         }
     }
 }

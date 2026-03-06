@@ -2,7 +2,12 @@ package org.vmstudio.itemtaker.forge;
 
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -28,14 +33,24 @@ public class ItemTakerMod {
 
     public ItemTakerMod(){
         CHANNEL.registerMessage(0, ItemSyncPacket.class, ItemSyncPacket::encode, ItemSyncPacket::decode, ItemSyncPacket::handle);
+        CHANNEL.registerMessage(1, ItemPickupPacket.class, ItemPickupPacket::encode, ItemPickupPacket::decode, ItemPickupPacket::handle);
 
         if(!ModLoader.get().isDedicatedServer()){
-            ItemTakerLogic.bridge = (e, x, y, z, vx, vy, vz, g) -> CHANNEL.sendToServer(new ItemSyncPacket(e.getId(), x, y, z, vx, vy, vz, g));
-            VisorAPI.registerAddon(
-                new ItemTakerAddonClient()
-            );
+            ItemTakerLogic.bridge = new ItemTakerLogic.NetworkBridge() {
+                @Override
+                public void sendSync(Entity entity, double x, double y, double z, double vx, double vy, double vz, boolean noGravity) {
+                    CHANNEL.sendToServer(new ItemSyncPacket(entity.getId(), x, y, z, vx, vy, vz, noGravity));
+                }
+
+                @Override
+                public void sendPickup(Entity entity, boolean isMainHand) {
+                    CHANNEL.sendToServer(new ItemPickupPacket(entity.getId(), isMainHand));
+                }
+            };
+
+            VisorAPI.registerAddon(new ItemTakerAddonClient());
             MinecraftForge.EVENT_BUS.addListener(this::onTick);
-        }else{
+        } else {
             VisorAPI.registerAddon(new ItemTakerAddonServer());
         }
     }
@@ -65,10 +80,66 @@ public class ItemTakerMod {
         public static void handle(ItemSyncPacket msg, Supplier<NetworkEvent.Context> ctx) {
             ctx.get().enqueueWork(() -> {
                 Entity entity = ctx.get().getSender().level().getEntity(msg.id);
-                if (entity != null) {
-                    entity.setNoGravity(msg.noGrav);
-                    entity.teleportTo(msg.x, msg.y, msg.z);
-                    entity.setDeltaMovement(msg.vx, msg.vy, msg.vz);
+                if (entity instanceof ItemEntity itemEntity) {
+                    itemEntity.setNoGravity(msg.noGrav);
+                    itemEntity.teleportTo(msg.x, msg.y, msg.z);
+                    itemEntity.setDeltaMovement(msg.vx, msg.vy, msg.vz);
+                    itemEntity.hasImpulse = true;
+                    if (!msg.noGrav) itemEntity.setPickUpDelay(0);
+                }
+            });
+            ctx.get().setPacketHandled(true);
+        }
+    }
+
+    public static class ItemPickupPacket {
+        private final int id;
+        private final boolean isMainHand;
+
+        public ItemPickupPacket(int id, boolean isMainHand) {
+            this.id = id;
+            this.isMainHand = isMainHand;
+        }
+
+        public static void encode(ItemPickupPacket msg, FriendlyByteBuf buf) {
+            buf.writeInt(msg.id);
+            buf.writeBoolean(msg.isMainHand);
+        }
+
+        public static ItemPickupPacket decode(FriendlyByteBuf buf) {
+            return new ItemPickupPacket(buf.readInt(), buf.readBoolean());
+        }
+
+        public static void handle(ItemPickupPacket msg, Supplier<NetworkEvent.Context> ctx) {
+            ctx.get().enqueueWork(() -> {
+                var player = ctx.get().getSender();
+                Entity entity = player.level().getEntity(msg.id);
+
+                if (entity instanceof ItemEntity itemEntity) {
+                    ItemStack stack = itemEntity.getItem();
+                    InteractionHand targetHand = msg.isMainHand ? InteractionHand.MAIN_HAND : InteractionHand.OFF_HAND;
+
+                    if (player.getItemInHand(targetHand).isEmpty()) {
+                        player.setItemInHand(targetHand, stack.copy());
+                        stack.setCount(0);
+                    }
+                    else {
+                        if (!player.getInventory().add(stack)) {
+                            itemEntity.setNoGravity(false);
+                            itemEntity.setPickUpDelay(0);
+                            return;
+                        }
+                    }
+
+                    player.level().playSound(null, player.getX(), player.getY(), player.getZ(),
+                        SoundEvents.ITEM_PICKUP, SoundSource.PLAYERS,
+                        0.2F, (player.getRandom().nextFloat() - player.getRandom().nextFloat()) * 1.4F + 2.0F);
+
+                    if (stack.isEmpty()) {
+                        itemEntity.discard();
+                    } else {
+                        itemEntity.setItem(stack);
+                    }
                 }
             });
             ctx.get().setPacketHandled(true);
