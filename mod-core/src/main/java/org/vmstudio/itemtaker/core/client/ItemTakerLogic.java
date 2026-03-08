@@ -26,9 +26,14 @@ public class ItemTakerLogic {
     public static NetworkBridge bridge;
 
     private static final double RANGE = 7.0;
-    private static final double PICKUP_DISTANCE = 0.6;
-    private static final double GROUP_RADIUS = 1.5;
-    private static final float FLICK_THRESHOLD = 0.20f;
+    private static final double PICKUP_DISTANCE = 0.7;
+    private static final double GROUP_RADIUS = 1.7;
+
+    private static final double REQUIRED_ANGLE_NEW = 0.92;
+    private static final double REQUIRED_ANGLE_STICKY = 0.85;
+
+    private static final float FLICK_THRESHOLD = 0.08f;
+    private static final float FLICK_UP_THRESHOLD = 0.04f;
 
     private static final int DROP_COOLDOWN_TICKS = 40;
     private static final int TARGETING_DELAY_TICKS = 20;
@@ -118,7 +123,7 @@ public class ItemTakerLogic {
             Vec3 toItem = item.position().add(0, 0.25, 0).subtract(handPos).normalize();
             double dot = handForward.dot(toItem);
 
-            double requiredAngle = currentGlowingItems.contains(item) ? 0.70 : 0.85;
+            double requiredAngle = currentGlowingItems.contains(item) ? REQUIRED_ANGLE_STICKY : REQUIRED_ANGLE_NEW;
 
             if (dot > requiredAngle && dot > bestAngle) {
                 if (canFitInSimulatedInventory(mc, item.getItem())) {
@@ -141,18 +146,26 @@ public class ItemTakerLogic {
                 if (mc.level.random.nextInt(3) == 0) {
                     mc.level.addParticle(ParticleTypes.GLOW,
                         bestTarget.getX(), bestTarget.getY() + 0.3, bestTarget.getZ(),
-                        0, 0.02, 0);
+                        0, 0.03, 0);
                 }
 
-                Vector3f netMove = rawCtrl.getPositionHistory().netMovement(0.15f);
-                Vec3 moveVec = new Vec3(netMove.x(), netMove.y(), netMove.z());
+                Vector3f netMoveF = rawCtrl.getPositionHistory().netMovement(0.15f);
+                Vec3 moveVec = new Vec3(netMoveF.x(), netMoveF.y(), netMoveF.z());
                 double moveLen = moveVec.length();
 
-                Vec3 toTarget = bestTarget.position().subtract(handPos).normalize();
-                double dotTowardsItem = moveLen > 0 ? (moveVec.dot(toTarget) / moveLen) : 0;
+                if (moveLen > FLICK_THRESHOLD) {
 
-                if (moveLen > FLICK_THRESHOLD && (moveVec.y < -0.1 || dotTowardsItem < -0.2)) {
-                    captureItems(mc, bestTarget, handType);
+                    boolean flickUp = moveVec.y > FLICK_UP_THRESHOLD;
+
+                    Vector3f rawHand = rawCtrl.getAimPosition();
+                    Vector3f rawHead = vrPlayer.getRawHmd().getHeadsetPosition();
+                    Vec3 toHead = new Vec3(rawHead.x() - rawHand.x(), rawHead.y() - rawHand.y(), rawHead.z() - rawHand.z()).normalize();
+
+                    boolean flickTowardsPlayer = moveVec.normalize().dot(toHead) > 0.3;
+
+                    if (flickUp || flickTowardsPlayer) {
+                        captureItems(mc, bestTarget, handType);
+                    }
                 }
             }
         }
@@ -169,9 +182,12 @@ public class ItemTakerLogic {
             if (canFitInSimulatedInventory(mc, groupItem.getItem())) {
                 groupItem.setNoGravity(true);
                 groupItem.setGlowingTag(false);
+
+                currentGlowingItems.remove(groupItem);
+                targetingStartTicks.remove(groupItem.getUUID());
+
                 groupItem.setPickUpDelay(10);
                 pulledItems.add(new PulledItem(groupItem, handType));
-                targetingStartTicks.remove(groupItem.getUUID());
             }
         }
     }
@@ -191,7 +207,7 @@ public class ItemTakerLogic {
                 return true;
             }
 
-            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(0.75);
+            Vec3 motion = targetPos.subtract(item.position()).normalize().scale(1.0);
             item.setDeltaMovement(motion);
             item.hasImpulse = true;
 
